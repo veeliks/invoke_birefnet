@@ -1,5 +1,9 @@
 """BiRefNet background removal for InvokeAI."""
 
+import importlib.util
+import urllib.request
+from pathlib import Path
+from types import ModuleType
 from typing import Literal
 
 import torch
@@ -53,6 +57,7 @@ ModelType = Literal[
 ]
 
 _MODEL_CACHE = {}
+_IMAGE_PROC_MODULE = None
 
 
 def _get_model(model_name: str, device: torch.device) -> torch.nn.Module:
@@ -73,6 +78,36 @@ def _get_model(model_name: str, device: torch.device) -> torch.nn.Module:
         _MODEL_CACHE[cache_key] = model
 
     return _MODEL_CACHE[cache_key]
+
+
+def _get_image_proc_module(context: InvocationContext) -> ModuleType | None:
+    global _IMAGE_PROC_MODULE
+
+    if _IMAGE_PROC_MODULE is not None:
+        return _IMAGE_PROC_MODULE
+
+    cache_dir = Path.home() / ".cache" / "birefnet"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    image_proc_path = cache_dir / "image_proc.py"
+
+    if not image_proc_path.exists():
+        url = "https://raw.githubusercontent.com/ZhengPeng7/BiRefNet/main/image_proc.py"
+        try:
+            urllib.request.urlretrieve(url, image_proc_path)
+            context.logger.info("Downloaded image_proc.py from BiRefNet repository")
+        except Exception as e:
+            context.logger.warning(f"Failed to download image_proc.py: {e}")
+            return None
+
+    try:
+        spec = importlib.util.spec_from_file_location("image_proc", image_proc_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _IMAGE_PROC_MODULE = module
+        return module
+    except Exception as e:
+        context.logger.warning(f"Failed to import image_proc module: {e}")
+        return None
 
 
 def _preprocess(image: Image.Image, device: torch.device) -> torch.Tensor:
@@ -115,13 +150,17 @@ def _predict_mask(
     title="Remove Background (BiRefNet)",
     tags=["background", "removal", "mask", "birefnet"],
     category="image",
-    version="0.0.1",
+    version="0.0.2",
 )
 class BiRefNetInvocation(BaseInvocation):
     """Remove image background using BiRefNet."""
 
     image: ImageField = InputField(description="Input image")
     model: ModelType = InputField(default="BiRefNet", description="Model variant")
+    refine_foreground: bool = InputField(
+        default=False,
+        description="Apply foreground color estimation to prevent background bleed"
+    )
 
     def invoke(self, context: InvocationContext) -> ImageOutput:
         image = context.images.get_pil(self.image.image_name)
@@ -132,7 +171,18 @@ class BiRefNetInvocation(BaseInvocation):
         if image.mode != "RGB":
             image = image.convert("RGB")
 
-        r, g, b = image.split()
+        if self.refine_foreground:
+            image_proc = _get_image_proc_module(context)
+            if image_proc is not None:
+                device_str = "cuda" if device.type == "cuda" else "cpu"
+                refined_fg = image_proc.refine_foreground(image, mask, device=device_str)
+                r, g, b = refined_fg.split()
+            else:
+                context.logger.warning("refine_foreground unavailable, using original image")
+                r, g, b = image.split()
+        else:
+            r, g, b = image.split()
+
         rgba = Image.merge("RGBA", (r, g, b, mask))
 
         image_dto = context.images.save(image=rgba)

@@ -12,7 +12,7 @@ A custom node for [InvokeAI](https://github.com/invoke-ai/InvokeAI) that provide
 
 ---
 
-<img src=".readme/invoke_workflow_example.png" width="100%" alt="Example of the node used in a workflow">
+<img src=".readme/invoke_workflow_example_v2.png" width="100%" alt="Example of the node used in a workflow">
 
 ## Installation
 
